@@ -6,6 +6,7 @@
   androidenv,
   jdk17,
   ninja,
+}:
 
 let
   gradle = gradle_8.override { java = jdk17; };
