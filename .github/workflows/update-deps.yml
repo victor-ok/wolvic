@@ -1,0 +1,46 @@
+name: Update Gradle deps.json
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'nix/wolvic/package.nix'
+      - 'gradle/libs.versions.toml'
+      - 'app/build.gradle'
+
+jobs:
+  update-deps:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Enable KVM (speeds up Android emulator if needed)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Generate deps.json
+        run: nix run .#wolvic-update-deps
+
+      - name: Commit and push deps.json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add nix/wolvic/deps.json
+          git diff --staged --quiet || git commit -m "nix: update wolvic deps.json"
+          git push

@@ -1,77 +1,56 @@
-# https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-java-with-gradle?learn=continuous_integration&learnProduct=actions
-
-name: Build
+name: Build Wolvic APK
 
 on:
-  workflow_call:
-    inputs:
-      flavour:
-        description: 'Build flavour'
-        required: true
-        type: string
-      internal:
-        description: 'Internal build'
-        required: false
-        type: boolean
-        default: false
-      jdk_version:
-        description: 'JDK version'
-        required: false
-        type: string
-        default: "17"
-      jdk_distribution:
-        description: 'JDK distribution'
-        required: false
-        type: string
-        default: "adopt"
-      gradle_version:
-        description: 'Gradle version'
-        required: false
-        type: string
-        default: "8.13"
+  push:
+    branches: [ nixify ]
+  pull_request:
+    branches: [ nixify ]
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Build Wolvic ${{ inputs.flavour }} Flavour
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Wolvic
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          submodules: 'true'
+          submodules: recursive
 
-      # Inspired by https://stackoverflow.com/questions/60679609/github-action-to-simply-cat-a-file-to-an-output
-      - name: Read wolvic third parties SHA
-        if: inputs.internal == true
-        run: echo "third_party_sha=$(cat third_party_hash)" >> $GITHUB_ENV
-
-      - name: Checkout third parties
-        if: inputs.internal == true
-        uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
         with:
-          ref: ${{ env.third_party_sha }}
-          repository: Igalia/wolvic-third-parties
-          token: ${{ secrets.THIRD_PARTY_PAT }}
-          submodules: 'true'
-          path: 'third_party'
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
 
-      - name: Set up JDK ${{ inputs.jdk_version }}
-        uses: actions/setup-java@v4
-        with:
-          java-version: ${{ inputs.jdk_version }}
-          distribution: ${{ inputs.jdk_distribution }}
+      - name: Check flake
+        run: nix flake check
 
-      - name: Setup Gradle ${{ inputs.gradle_version }}
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: ${{ inputs.gradle_version }}
+      - name: Build Wolvic APK
+        run: nix build .#wolvic-apk --print-build-logs
 
-      - name: Build ${{ inputs.flavour }} Flavour
-        run: ./gradlew ${{ inputs.flavour }}
+      - name: Verify APK exists
+        run: |
+          ls -lh result/*.apk
+          echo "APK sha256: $(sha256sum result/*.apk)"
 
-      - name: Upload APK (without WebXR support) to Artifacts
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.flavour }}_no_webxr
-          path: app/build/outputs/apk/
+          name: wolvic-noapi-debug
+          path: result/*.apk
+          retention-days: 30
+
+      - name: Build again to verify reproducibility
+        run: |
+          nix build .#wolvic-apk --rebuild --out-link result2
+          echo "=== Reproducibility check ==="
+          HASH1=$(sha256sum result/*.apk  | awk '{print $1}')
+          HASH2=$(sha256sum result2/*.apk | awk '{print $1}')
+          echo "Build 1: $HASH1"
+          echo "Build 2: $HASH2"
+          if [ "$HASH1" = "$HASH2" ]; then
+            echo "✓ Builds are identical — reproducible!"
+          else
+            echo "✗ FAIL: builds differ — not reproducible"
+            exit 1
+          fi
