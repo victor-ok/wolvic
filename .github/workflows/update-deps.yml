@@ -23,6 +23,14 @@ jobs:
           submodules: recursive
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Allow unprivileged user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          # Belt-and-suspenders: also raise the max userns count in case it's 0
+          sudo sysctl -w user.max_user_namespaces=15000 || true
+          echo "userns restriction now:"
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo "n/a"
+
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -51,6 +59,12 @@ jobs:
           echo "Update script is at: $UPDATE_SCRIPT"
           file "$UPDATE_SCRIPT"
 
+      - name: Test bubblewrap works
+        run: |
+          NIX_BWRAP=$(nix build nixpkgs#bubblewrap --no-link --print-out-paths --system x86_64-linux)/bin/bwrap
+          echo "Testing: $NIX_BWRAP"
+          "$NIX_BWRAP" --ro-bind / / --unshare-user --uid 0 -- /bin/echo "bwrap OK"
+
       - name: Generate deps.json
         run: |
           echo "Working directory: $(pwd)"
@@ -69,13 +83,12 @@ jobs:
           echo "deps.json size: $SIZE bytes"
           if [ "$SIZE" -lt 1000 ]; then
             echo "ERROR: deps.json is suspiciously small ($SIZE bytes)"
-            echo "Gradle may have failed before recording any dependencies."
             echo "--- deps.json contents ---"
             cat nix/wolvic/deps.json
             exit 1
           fi
           echo "✓ deps.json looks good ($SIZE bytes)"
-          echo "--- First 20 lines of deps.json ---"
+          echo "--- First 20 lines ---"
           head -20 nix/wolvic/deps.json
 
       - name: Commit and push deps.json
