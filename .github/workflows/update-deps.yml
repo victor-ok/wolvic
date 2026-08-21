@@ -7,6 +7,8 @@ on:
       - 'nix/wolvic/package.nix'
       - 'gradle/libs.versions.toml'
       - 'app/build.gradle'
+      - 'build.gradle'
+      - 'settings.gradle'
 
 jobs:
   update-deps:
@@ -21,28 +23,66 @@ jobs:
           submodules: recursive
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: cachix/install-nix-action@v27
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-            accept-flake-config = true
-
-      - name: Enable KVM (speeds up Android emulator if needed)
+      - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Verify package evaluates
+        run: nix eval .#packages.x86_64-linux.wolvic-apk --system x86_64-linux
+
+      - name: Build updateScript
+        run: |
+          UPDATE_SCRIPT=$(nix build \
+            .#packages.x86_64-linux.wolvic-apk.mitmCache.updateScript \
+            --no-link --print-out-paths \
+            --system x86_64-linux)
+          echo "UPDATE_SCRIPT=$UPDATE_SCRIPT" >> $GITHUB_ENV
+          echo "Update script is at: $UPDATE_SCRIPT"
+          file "$UPDATE_SCRIPT"
+
       - name: Generate deps.json
         run: |
-          UPDATE_SCRIPT=$(nix build .#wolvic-apk.mitmCache.updateScript --no-link --print-out-paths)
+          echo "Running update script: $UPDATE_SCRIPT"
           bash "$UPDATE_SCRIPT"
+
+      - name: Verify deps.json was written
+        run: |
+          if [ ! -f nix/wolvic/deps.json ]; then
+            echo "ERROR: deps.json was not created"
+            exit 1
+          fi
+          SIZE=$(wc -c < nix/wolvic/deps.json)
+          echo "deps.json size: $SIZE bytes"
+          if [ "$SIZE" -lt 1000 ]; then
+            echo "ERROR: deps.json is suspiciously small ($SIZE bytes)"
+            echo "Gradle may have failed before recording any dependencies."
+            echo "--- deps.json contents ---"
+            cat nix/wolvic/deps.json
+            exit 1
+          fi
+          echo "✓ deps.json looks good ($SIZE bytes)"
+          # Show first few entries as a sanity check
+          echo "--- First 20 lines of deps.json ---"
+          head -20 nix/wolvic/deps.json
 
       - name: Commit and push deps.json
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add nix/wolvic/deps.json
-          git diff --staged --quiet || git commit -m "nix: update wolvic deps.json [skip ci]"
-          git push
+          if git diff --staged --quiet; then
+            echo "deps.json unchanged — nothing to commit"
+          else
+            git commit -m "nix: update wolvic deps.json [skip ci]"
+            git push
+            echo "✓ deps.json pushed to branch"
+          fi
