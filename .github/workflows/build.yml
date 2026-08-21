@@ -7,9 +7,6 @@ on:
     branches: [ nixify ]
   workflow_dispatch:
 
-  # ── Reusable workflow entrypoint ──────────────────────────────────────────
-  # Called by ci-internal.yaml with `uses: ./.github/workflows/build.yml`
-  # Inputs must match exactly what ci-internal.yaml passes via `with:`.
   workflow_call:
     inputs:
       flavour:
@@ -34,8 +31,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          # Use PAT for internal builds so third-party submodules can be fetched
-          token: ${{ inputs.internal && secrets.THIRD_PARTY_PAT || github.token }}
+          token: ${{ (inputs.internal == true && secrets.THIRD_PARTY_PAT != '') && secrets.THIRD_PARTY_PAT || github.token }}
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
 
       - uses: cachix/install-nix-action@v27
         with:
@@ -46,58 +49,88 @@ jobs:
       - name: Check flake evaluates
         run: nix flake check
 
-      # ── Internal flavour builds (proprietary SDKs, triggered by ci-internal) ──
-      # These use the Gradle devShell directly since the proprietary platform
-      # SDKs (Oculus, Pico, HVR, etc.) cannot be fetched in the Nix sandbox.
       - name: Build internal flavour with Gradle
-        if: ${{ inputs.internal && inputs.flavour != '' }}
+        if: ${{ inputs.internal == true && inputs.flavour != '' }}
         run: |
           nix develop --command bash -c "
             git submodule update --init --recursive
             ./gradlew app:${{ inputs.flavour }} \
               -Dfile.encoding=utf-8 \
-              -Dorg.gradle.configuration-cache=false
+              -Dorg.gradle.configuration-cache=false \
+              --stacktrace
           "
 
       - name: Upload internal APK
-        if: ${{ inputs.internal && inputs.flavour != '' }}
+        if: ${{ inputs.internal == true && inputs.flavour != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: wolvic-${{ inputs.flavour }}
           path: app/build/outputs/apk/**/*.apk
           retention-days: 30
 
-      # ── Nix reproducible build (noapi, triggered directly / on push) ──────
+
+      - name: Check deps.json is populated
+        if: ${{ inputs.internal != true }}
+        run: |
+          DEPS=nix/wolvic/deps.json
+          if [ ! -f "$DEPS" ]; then
+            echo "ERROR: $DEPS does not exist."
+            echo "Run the 'Update Gradle deps.json' workflow first."
+            exit 1
+          fi
+          SIZE=$(wc -c < "$DEPS")
+          if [ "$SIZE" -lt 100 ]; then
+            echo "ERROR: $DEPS is too small ($SIZE bytes) — not yet populated."
+            echo "Run the 'Update Gradle deps.json' workflow first, then re-run this build."
+            exit 1
+          fi
+          echo "✓ deps.json is populated ($SIZE bytes)"
+
       - name: Build Wolvic APK with Nix
-        if: ${{ !inputs.internal }}
+        if: ${{ inputs.internal != true }}
         run: nix build .#wolvic-apk --print-build-logs
 
       - name: Verify APK exists
-        if: ${{ !inputs.internal }}
+        if: ${{ inputs.internal != true }}
         run: |
+          if ! ls result/*.apk &>/dev/null; then
+            echo "ERROR: No APK found in result/"
+            exit 1
+          fi
+          echo "=== Built APK(s) ==="
           ls -lh result/*.apk
-          echo "APK sha256: $(sha256sum result/*.apk)"
+          echo ""
+          echo "=== SHA-256 checksums ==="
+          sha256sum result/*.apk
 
       - name: Upload Nix-built APK
-        if: ${{ !inputs.internal }}
+        if: ${{ inputs.internal != true }}
         uses: actions/upload-artifact@v4
         with:
           name: wolvic-noapi-debug
           path: result/*.apk
           retention-days: 30
 
-      - name: Verify reproducibility (build twice, compare hashes)
-        if: ${{ !inputs.internal }}
+      - name: Verify reproducibility
+        if: ${{ inputs.internal != true }}
         run: |
-          nix build .#wolvic-apk --rebuild --out-link result2
+          echo "Building a second time with --rebuild..."
+          nix build .#wolvic-apk --rebuild --out-link result2 --print-build-logs
+
+          echo ""
           echo "=== Reproducibility check ==="
           HASH1=$(sha256sum result/*.apk  | awk '{print $1}')
           HASH2=$(sha256sum result2/*.apk | awk '{print $1}')
           echo "Build 1: $HASH1"
           echo "Build 2: $HASH2"
+
           if [ "$HASH1" = "$HASH2" ]; then
-            echo "✓ Reproducible — both builds are identical"
+            echo ""
+            echo "✓ SUCCESS — both builds are byte-for-byte identical."
+            echo "  This APK is reproducible."
           else
-            echo "✗ FAIL — builds differ"
+            echo ""
+            echo "✗ FAIL — the two builds differ."
+            echo "  Check for timestamps, random salts, or non-deterministic ordering."
             exit 1
           fi
