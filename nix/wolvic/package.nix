@@ -1,4 +1,4 @@
-git add nix/wolvic/package.nix{
+{
   lib,
   stdenv,
   fetchFromGitHub,
