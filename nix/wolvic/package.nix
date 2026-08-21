@@ -5,7 +5,7 @@
   gradle_8,
   androidenv,
   jdk17,
-}:
+  ninja,
 
 let
   gradle = gradle_8.override { java = jdk17; };
@@ -22,11 +22,12 @@ let
 
   androidSdk     = androidComposition.androidsdk;
   androidSdkPath = "${androidSdk}/libexec/android-sdk";
-  androidNdkPath = "${androidSdkPath}/ndk-bundle";
 
   cmakeVersion = "3.22.1";
   ndkVersion   = "27.0.12077973";
   version      = "1.9";
+
+  ndkPath = "${androidSdkPath}/ndk/${ndkVersion}";
 
 in
 stdenv.mkDerivation (finalAttrs: {
@@ -41,7 +42,7 @@ stdenv.mkDerivation (finalAttrs: {
     fetchSubmodules = true;
   };
 
-  nativeBuildInputs = [ gradle ];
+  nativeBuildInputs = [ gradle ninja ];
 
   postPatch = ''
     # Fix 1: patch out `git rev-parse` — no .git dir in the sandbox
@@ -50,20 +51,21 @@ stdenv.mkDerivation (finalAttrs: {
         "commandLine 'git', 'rev-parse', '--short', 'HEAD'" \
         "commandLine 'echo', 'v${finalAttrs.version}-nix'"
 
-    # Fix 2: deterministic version code (date-derived by default)
+    # Fix 2: deterministic version code
     echo "useStaticVersionCode=true"     >> gradle.properties
 
     # Fix 3: debug signing so we don't need a real keystore
     echo "useDebugSigningOnRelease=true" >> gradle.properties
 
-    # Fix 4: disable Gradle config cache (Nix store paths change between envs)
+    # Fix 4: disable Gradle config cache
     echo "org.gradle.configuration-cache=false" >> gradle.properties
   '';
 
   env = {
     ANDROID_HOME     = androidSdkPath;
     ANDROID_SDK_ROOT = androidSdkPath;
-    ANDROID_NDK_ROOT = androidNdkPath;
+    ANDROID_NDK_ROOT = ndkPath;
+    ANDROID_NDK_HOME = ndkPath;
     JAVA_HOME        = "${jdk17}";
   };
 
@@ -71,9 +73,30 @@ stdenv.mkDerivation (finalAttrs: {
     export ANDROID_USER_HOME="$TMPDIR/.android"
     mkdir -p "$ANDROID_USER_HOME"
 
-    # NDK bundles CMake under a build-number-suffixed path, e.g. 3.22.1.12345678/bin
+    # ── Provide a writable local.properties pointing at correct paths ────────
+    # ndk.dir must be the versioned path (ndk/<version>), NOT ndk-bundle,
+    # or AGP throws [CXX5304] "inconsistent location".
+    cat > local.properties <<EOF
+sdk.dir=${androidSdkPath}
+ndk.dir=${ndkPath}
+cmake.dir=$(echo ${androidSdkPath}/cmake/${cmakeVersion}.*/ | head -1 | sed 's:/*$::')
+EOF
+
+    # ── Put system ninja on PATH ahead of the NDK's bundled ninja ────────────
+    # The Nix Android CMake package bundles a ninja that fails with
+    #   ninja: fatal: posix_spawn: No such file or directory
+    # inside the build sandbox. The nixpkgs `ninja` works correctly.
+    export PATH="${ninja}/bin:$PATH"
+
+    # ── Also add the CMake bin dir so `cmake` itself is found ────────────────
     NDK_CMAKE_BIN="$(echo "${androidSdkPath}/cmake/${cmakeVersion}".*/bin)"
     export PATH="$NDK_CMAKE_BIN:$PATH"
+
+    # ── Force AGP to use the system ninja for its native builds ──────────────
+    # -DCMAKE_MAKE_PROGRAM tells CMake which ninja to use; we inject it via a
+    # gradle property that Wolvic's build.gradle forwards to externalNativeBuild.
+    echo "Using ninja: $(command -v ninja)"
+    ninja --version
   '';
 
   gradleUpdateTask = "assembleNoapiArm64GeckoGenericDebug";
@@ -90,6 +113,7 @@ stdenv.mkDerivation (finalAttrs: {
     "-Dorg.gradle.configuration-cache=false"
     "-Pandroid.aapt2FromMavenOverride=${androidSdkPath}/build-tools/35.0.0/aapt2"
     "-Pandroid.injected.testOnly=false"
+    "-Pandroid.native.buildOutput=verbose"
   ];
 
   gradleBuildTask = "assembleNoapiArm64GeckoGenericDebug";
@@ -111,18 +135,11 @@ stdenv.mkDerivation (finalAttrs: {
 
   passthru = {
     inherit cmakeVersion ndkVersion;
-    updateDeps = finalAttrs.finalPackage.mitmCache;
+    updateDeps = finalAttrs.finalPackage.mitmCache.updateScript;
   };
 
   meta = {
     description = "Wolvic XR Browser — noapi arm64 gecko debug APK";
-    longDescription = ''
-      Reproducible Nix build of the Wolvic XR Browser targeting the `noapi`
-      platform variant (standard Android, no proprietary VR SDK required),
-      using GeckoView (Firefox engine) as the web backend.
-      Output is an unsigned debug APK; use the sign-apk devShell script
-      to sign it for device installation.
-    '';
     homepage    = "https://wolvic.com";
     license     = lib.licenses.mpl20;
     maintainers = [ ];
