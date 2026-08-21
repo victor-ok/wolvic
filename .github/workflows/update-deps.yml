@@ -37,7 +37,7 @@ jobs:
       - name: Generate deps.json
         run: |
           nix build .#wolvic-apk.mitmCache.updateScript --out-link update-deps
-          ./update-deps/bin/update-deps
+          $(readlink -f update-deps)
 
       - name: Commit and push deps.json
         run: |

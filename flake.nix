@@ -38,6 +38,9 @@
           "system-images"             # needed when includeSystemImages = true
           "android-sdk-system-images"
           "tools"
+          "emulate-wolvic-noapi"
+          "emulate-wolvic-with-app"
+          "emulate-wolvic-emulator-bare"
         ];
 
         # ── pkgs ──────────────────────────────────────────────────────────────

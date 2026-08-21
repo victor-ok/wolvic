@@ -7,6 +7,25 @@ on:
     branches: [ nixify ]
   workflow_dispatch:
 
+  # ── Reusable workflow entrypoint ──────────────────────────────────────────
+  # Called by ci-internal.yaml with `uses: ./.github/workflows/build.yml`
+  # Inputs must match exactly what ci-internal.yaml passes via `with:`.
+  workflow_call:
+    inputs:
+      flavour:
+        description: "Gradle assemble task flavour (e.g. assembleNoapiArm64GeckoGenericDebug)"
+        required: false
+        type: string
+        default: "assembleNoapiArm64GeckoGenericDebug"
+      internal:
+        description: "Whether this is an internal build (has access to third-party SDKs)"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      THIRD_PARTY_PAT:
+        required: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -15,6 +34,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # Use PAT for internal builds so third-party submodules can be fetched
+          token: ${{ inputs.internal && secrets.THIRD_PARTY_PAT || github.token }}
 
       - uses: cachix/install-nix-action@v27
         with:
@@ -22,25 +43,51 @@ jobs:
             experimental-features = nix-command flakes
             accept-flake-config = true
 
-      - name: Check flake
+      - name: Check flake evaluates
         run: nix flake check
 
-      - name: Build Wolvic APK
+      # ── Internal flavour builds (proprietary SDKs, triggered by ci-internal) ──
+      # These use the Gradle devShell directly since the proprietary platform
+      # SDKs (Oculus, Pico, HVR, etc.) cannot be fetched in the Nix sandbox.
+      - name: Build internal flavour with Gradle
+        if: ${{ inputs.internal && inputs.flavour != '' }}
+        run: |
+          nix develop --command bash -c "
+            git submodule update --init --recursive
+            ./gradlew app:${{ inputs.flavour }} \
+              -Dfile.encoding=utf-8 \
+              -Dorg.gradle.configuration-cache=false
+          "
+
+      - name: Upload internal APK
+        if: ${{ inputs.internal && inputs.flavour != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolvic-${{ inputs.flavour }}
+          path: app/build/outputs/apk/**/*.apk
+          retention-days: 30
+
+      # ── Nix reproducible build (noapi, triggered directly / on push) ──────
+      - name: Build Wolvic APK with Nix
+        if: ${{ !inputs.internal }}
         run: nix build .#wolvic-apk --print-build-logs
 
       - name: Verify APK exists
+        if: ${{ !inputs.internal }}
         run: |
           ls -lh result/*.apk
           echo "APK sha256: $(sha256sum result/*.apk)"
 
-      - name: Upload APK artifact
+      - name: Upload Nix-built APK
+        if: ${{ !inputs.internal }}
         uses: actions/upload-artifact@v4
         with:
           name: wolvic-noapi-debug
           path: result/*.apk
           retention-days: 30
 
-      - name: Build again to verify reproducibility
+      - name: Verify reproducibility (build twice, compare hashes)
+        if: ${{ !inputs.internal }}
         run: |
           nix build .#wolvic-apk --rebuild --out-link result2
           echo "=== Reproducibility check ==="
@@ -49,8 +96,8 @@ jobs:
           echo "Build 1: $HASH1"
           echo "Build 2: $HASH2"
           if [ "$HASH1" = "$HASH2" ]; then
-            echo "✓ Builds are identical — reproducible!"
+            echo "✓ Reproducible — both builds are identical"
           else
-            echo "✗ FAIL: builds differ — not reproducible"
+            echo "✗ FAIL — builds differ"
             exit 1
           fi
