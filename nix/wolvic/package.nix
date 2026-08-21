@@ -1,11 +1,11 @@
-{
+git add nix/wolvic/package.nix{
   lib,
   stdenv,
   fetchFromGitHub,
   gradle_8,
   androidenv,
   jdk17,
-  ninja,   # system ninja — the NDK's bundled one fails with posix_spawn in the sandbox
+  ninja,
 }:
 
 let
@@ -60,6 +60,19 @@ stdenv.mkDerivation (finalAttrs: {
 
     # Fix 4: disable Gradle config cache
     echo "org.gradle.configuration-cache=false" >> gradle.properties
+
+    # ── Fix 5: force nixpkgs ninja as CMAKE_MAKE_PROGRAM ─────────────────────
+    # AGP passes -DCMAKE_MAKE_PROGRAM pointing at the SDK's bundled ninja, which
+    # fails with "posix_spawn: No such file or directory" in the Nix sandbox.
+    # CMAKE_MAKE_PROGRAM in the defaultConfig cmake {} arguments propagates to
+    # ALL native sub-invocations including the compiler check, so this is the
+    # reliable place to override it.
+    # The exact literal in app/build.gradle (defaultConfig) is:
+    #   arguments "-DANDROID_STL=c++_shared"
+    substituteInPlace app/build.gradle \
+      --replace-fail \
+        'arguments "-DANDROID_STL=c++_shared"' \
+        'arguments "-DANDROID_STL=c++_shared", "-DCMAKE_MAKE_PROGRAM=${ninja}/bin/ninja"'
   '';
 
   env = {
@@ -74,11 +87,7 @@ stdenv.mkDerivation (finalAttrs: {
     export ANDROID_USER_HOME="$TMPDIR/.android"
     mkdir -p "$ANDROID_USER_HOME"
 
-    # ── Locate the CMake directory robustly ──────────────────────────────────
-    # The Nix Android CMake package may live at either:
-    #   <sdk>/cmake/3.22.1/          (plain version)
-    #   <sdk>/cmake/3.22.1.xxxxxxxx/ (build-number suffix)
-    # Find whichever actually exists and contains bin/cmake.
+    # Locate the CMake directory robustly
     CMAKE_DIR=""
     for candidate in "${androidSdkPath}/cmake/${cmakeVersion}" "${androidSdkPath}/cmake/${cmakeVersion}".*; do
       if [ -x "$candidate/bin/cmake" ]; then
@@ -86,16 +95,13 @@ stdenv.mkDerivation (finalAttrs: {
         break
       fi
     done
-
     if [ -z "$CMAKE_DIR" ]; then
-      echo "ERROR: could not locate a usable cmake under ${androidSdkPath}/cmake/"
-      echo "Contents of cmake dir:"
+      echo "ERROR: could not locate cmake under ${androidSdkPath}/cmake/"
       ls -la "${androidSdkPath}/cmake/" || true
       exit 1
     fi
     echo "Resolved CMAKE_DIR=$CMAKE_DIR"
 
-    # ── Write local.properties with all three concrete paths ─────────────────
     cat > local.properties <<EOF
 sdk.dir=${androidSdkPath}
 ndk.dir=${ndkPath}
@@ -104,15 +110,18 @@ EOF
     echo "--- local.properties ---"
     cat local.properties
 
-    # ── Put system ninja + cmake on PATH ─────────────────────────────────────
-    # The NDK's bundled ninja fails with posix_spawn in the sandbox; use the
-    # nixpkgs ninja instead.
     export PATH="${ninja}/bin:$CMAKE_DIR/bin:$PATH"
 
     echo "Using ninja: $(command -v ninja)"
     ninja --version
     echo "Using cmake: $(command -v cmake)"
     cmake --version | head -1
+
+    CLANG="${ndkPath}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+    if [ -x "$CLANG" ]; then
+      echo "NDK clang version:"
+      "$CLANG" --version 2>&1 | head -2 || echo "WARNING: clang --version failed"
+    fi
   '';
 
   gradleUpdateTask = "assembleNoapiArm64GeckoGenericDebug";
