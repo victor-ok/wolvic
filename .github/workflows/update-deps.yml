@@ -36,13 +36,13 @@ jobs:
 
       - name: Generate deps.json
         run: |
-          nix build .#wolvic-apk.mitmCache.updateScript --out-link update-deps
-          $(readlink -f update-deps)
+          UPDATE_SCRIPT=$(nix build .#wolvic-apk.mitmCache.updateScript --no-link --print-out-paths)
+          bash "$UPDATE_SCRIPT"
 
       - name: Commit and push deps.json
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add nix/wolvic/deps.json
-          git diff --staged --quiet || git commit -m "nix: update wolvic deps.json"
+          git diff --staged --quiet || git commit -m "nix: update wolvic deps.json [skip ci]"
           git push
