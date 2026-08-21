@@ -52,7 +52,7 @@
           inherit system;
           config = {
             android_sdk.accept_license = true;
-            allowUnfreePredicate = pkg: lib.elem (lib.getName pkg) androidUnfreeNames;
+            allowUnfree = true;
           };
           overlays = [
             (final: prev: {
