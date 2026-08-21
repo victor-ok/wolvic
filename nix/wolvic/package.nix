@@ -5,7 +5,7 @@
   gradle_8,
   androidenv,
   jdk17,
-  ninja,
+  ninja,   # system ninja — the NDK's bundled one fails with posix_spawn in the sandbox
 }:
 
 let
@@ -74,30 +74,45 @@ stdenv.mkDerivation (finalAttrs: {
     export ANDROID_USER_HOME="$TMPDIR/.android"
     mkdir -p "$ANDROID_USER_HOME"
 
-    # ── Provide a writable local.properties pointing at correct paths ────────
-    # ndk.dir must be the versioned path (ndk/<version>), NOT ndk-bundle,
-    # or AGP throws [CXX5304] "inconsistent location".
+    # ── Locate the CMake directory robustly ──────────────────────────────────
+    # The Nix Android CMake package may live at either:
+    #   <sdk>/cmake/3.22.1/          (plain version)
+    #   <sdk>/cmake/3.22.1.xxxxxxxx/ (build-number suffix)
+    # Find whichever actually exists and contains bin/cmake.
+    CMAKE_DIR=""
+    for candidate in "${androidSdkPath}/cmake/${cmakeVersion}" "${androidSdkPath}/cmake/${cmakeVersion}".*; do
+      if [ -x "$candidate/bin/cmake" ]; then
+        CMAKE_DIR="$candidate"
+        break
+      fi
+    done
+
+    if [ -z "$CMAKE_DIR" ]; then
+      echo "ERROR: could not locate a usable cmake under ${androidSdkPath}/cmake/"
+      echo "Contents of cmake dir:"
+      ls -la "${androidSdkPath}/cmake/" || true
+      exit 1
+    fi
+    echo "Resolved CMAKE_DIR=$CMAKE_DIR"
+
+    # ── Write local.properties with all three concrete paths ─────────────────
     cat > local.properties <<EOF
 sdk.dir=${androidSdkPath}
 ndk.dir=${ndkPath}
-cmake.dir=$(echo ${androidSdkPath}/cmake/${cmakeVersion}.*/ | head -1 | sed 's:/*$::')
+cmake.dir=$CMAKE_DIR
 EOF
+    echo "--- local.properties ---"
+    cat local.properties
 
-    # ── Put system ninja on PATH ahead of the NDK's bundled ninja ────────────
-    # The Nix Android CMake package bundles a ninja that fails with
-    #   ninja: fatal: posix_spawn: No such file or directory
-    # inside the build sandbox. The nixpkgs `ninja` works correctly.
-    export PATH="${ninja}/bin:$PATH"
+    # ── Put system ninja + cmake on PATH ─────────────────────────────────────
+    # The NDK's bundled ninja fails with posix_spawn in the sandbox; use the
+    # nixpkgs ninja instead.
+    export PATH="${ninja}/bin:$CMAKE_DIR/bin:$PATH"
 
-    # ── Also add the CMake bin dir so `cmake` itself is found ────────────────
-    NDK_CMAKE_BIN="$(echo "${androidSdkPath}/cmake/${cmakeVersion}".*/bin)"
-    export PATH="$NDK_CMAKE_BIN:$PATH"
-
-    # ── Force AGP to use the system ninja for its native builds ──────────────
-    # -DCMAKE_MAKE_PROGRAM tells CMake which ninja to use; we inject it via a
-    # gradle property that Wolvic's build.gradle forwards to externalNativeBuild.
     echo "Using ninja: $(command -v ninja)"
     ninja --version
+    echo "Using cmake: $(command -v cmake)"
+    cmake --version | head -1
   '';
 
   gradleUpdateTask = "assembleNoapiArm64GeckoGenericDebug";
@@ -114,7 +129,6 @@ EOF
     "-Dorg.gradle.configuration-cache=false"
     "-Pandroid.aapt2FromMavenOverride=${androidSdkPath}/build-tools/35.0.0/aapt2"
     "-Pandroid.injected.testOnly=false"
-    "-Pandroid.native.buildOutput=verbose"
   ];
 
   gradleBuildTask = "assembleNoapiArm64GeckoGenericDebug";
