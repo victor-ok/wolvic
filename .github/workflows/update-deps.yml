@@ -35,6 +35,7 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            sandbox = false 
 
       - name: Verify package evaluates
         run: nix eval .#packages.x86_64-linux.wolvic-apk --system x86_64-linux
@@ -44,10 +45,10 @@ jobs:
           UPDATE_SCRIPT=$(nix build \
             .#packages.x86_64-linux.wolvic-apk.mitmCache.updateScript \
             --no-link --print-out-paths \
-            --system x86_64-linux)
+            --system x86_64-linux \
+            --option sandbox false)
           echo "UPDATE_SCRIPT=$UPDATE_SCRIPT" >> $GITHUB_ENV
           echo "Update script is at: $UPDATE_SCRIPT"
-          file "$UPDATE_SCRIPT"
 
       - name: Generate deps.json
         run: |
