@@ -224,7 +224,7 @@
           default            = wolvicPackage;
           wolvic-apk         = wolvicPackage;
           wolvic-noapi-debug = wolvicPackage;
-          wolvic-update-deps = wolvicPackage.passthru.updateDeps;
+          wolvic-update-deps = wolvicPackage.mitmCache.updateScript;
 
           # ── Bare emulator (no APK pre-loaded) ───────────────────────────────
           # Use this to confirm your AVD / KVM setup works before the APK build.

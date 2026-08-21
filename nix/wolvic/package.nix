@@ -111,7 +111,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   passthru = {
     inherit cmakeVersion ndkVersion;
-    updateDeps = finalAttrs.finalPackage.mitmCache.updateScript;
+    updateDeps = finalAttrs.finalPackage.mitmCache;
   };
 
   meta = {

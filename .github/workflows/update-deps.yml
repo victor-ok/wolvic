@@ -35,7 +35,9 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Generate deps.json
-        run: nix run .#wolvic-update-deps
+        run: |
+          nix build .#wolvic-apk.mitmCache.updateScript --out-link update-deps
+          ./update-deps/bin/update-deps
 
       - name: Commit and push deps.json
         run: |
