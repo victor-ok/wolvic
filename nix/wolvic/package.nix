@@ -73,6 +73,9 @@ stdenv.mkDerivation (finalAttrs: {
       --replace-fail \
         'arguments "-DANDROID_STL=c++_shared"' \
         'arguments "-DANDROID_STL=c++_shared", "-DCMAKE_MAKE_PROGRAM=${ninja}/bin/ninja"'
+
+    # They use #!/usr/bin/env bash which doesn't exist in the sandbox.
+    patchShebangs .
   '';
 
   env = {
