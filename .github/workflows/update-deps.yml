@@ -35,7 +35,7 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
             accept-flake-config = true
-            sandbox = false 
+            sandbox = false
 
       - name: Verify package evaluates
         run: nix eval .#packages.x86_64-linux.wolvic-apk --system x86_64-linux
@@ -49,11 +49,15 @@ jobs:
             --option sandbox false)
           echo "UPDATE_SCRIPT=$UPDATE_SCRIPT" >> $GITHUB_ENV
           echo "Update script is at: $UPDATE_SCRIPT"
+          file "$UPDATE_SCRIPT"
 
       - name: Generate deps.json
         run: |
+          echo "Working directory: $(pwd)"
           echo "Running update script: $UPDATE_SCRIPT"
           bash "$UPDATE_SCRIPT"
+          echo "--- Looking for deps.json after run ---"
+          find . -name "deps.json" -exec ls -la {} \;
 
       - name: Verify deps.json was written
         run: |
@@ -71,7 +75,6 @@ jobs:
             exit 1
           fi
           echo "✓ deps.json looks good ($SIZE bytes)"
-          # Show first few entries as a sanity check
           echo "--- First 20 lines of deps.json ---"
           head -20 nix/wolvic/deps.json
 
