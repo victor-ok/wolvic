@@ -15,48 +15,15 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        inherit (nixpkgs.legacyPackages.${system}) lib;
+        inherit (pkgs) lib;
 
-        androidUnfreeNames = [
-          "android-ndk"
-          "android-sdk-ndk" 
-          "ndk"                      
-          "android-ndk-r27-linux.zip"
-          "android-sdk-build-tools"
-          "android-sdk-cmdline-tools"
-          "android-sdk-platform-tools"
-          "android-sdk-platforms"
-          "android-sdk-tools"
-          "build-tools"
-          "cmake"
-          "cmdline-tools"
-          "emulator"                  # needed when includeEmulator = true
-          "android-sdk-emulator"
-          "ndk-bundle"
-          "platform-tools"
-          "platforms"
-          "system-images"             # needed when includeSystemImages = true
-          "android-sdk-system-images"
-          "tools"
-          "emulate-wolvic-noapi"
-          "emulate-wolvic-with-app"
-          "emulate-wolvic-emulator-bare"
-        ];
-
-        # ── pkgs ──────────────────────────────────────────────────────────────
-        # FIXED: `overlays` must be a top-level key of the import attrset,
-        # NOT nested inside `config`. Placing it inside config is silently
-        # ignored by nixpkgs, which is why etc2comp / fxr-compressor were
-        # never actually added to pkgs.
         pkgs = import nixpkgs {
           inherit system;
-          config = {
-            android_sdk.accept_license = true;
-            allowUnfree = true;
-          };
+          config.android_sdk.accept_license = true;
+          config.allowUnfree = true;
           overlays = [
             (final: prev: {
-              etc2comp      = final.callPackage ./nix/etc2comp/package.nix { };
+              etc2comp = final.callPackage ./nix/etc2comp/package.nix { };
               fxr-compressor = final.callPackage ./nix/compressor/package.nix { };
             })
           ];
@@ -68,7 +35,7 @@
           includeSystemImages = false;
         };
         androidSdkPath    = "${androidComposition.androidsdk}/libexec/android-sdk";
-        buildToolsVersion = "35.0.0";
+        buildToolsVersion = androidComposition.buildToolsVersion;
 
         # ── Android SDK for the emulator (adds emulator + x86_64 image) ──────
         # Kept separate so `nix build .#default` doesn't force a ~2 GB
@@ -79,155 +46,39 @@
         };
 
         # ── APK derivation ────────────────────────────────────────────────────
-        wolvicPackage = pkgs.callPackage ./nix/wolvic/package.nix { 
-          androidenv = pkgs.androidenv;
+        wolvicApk = pkgs.callPackage ./nix/wolvic/package.nix { 
+          inherit androidComposition androidSdkPath;
         };
 
         # ── APK signing helper ────────────────────────────────────────────────
-        signScript = pkgs.writeShellScriptBin "sign-apk" ''
-          set -euo pipefail
-          mkdir -p build
-          pushd build > /dev/null
-
-          if [ ! -f release.keystore ]; then
-            echo "Generating new release.keystore..."
-            ${pkgs.jdk17}/bin/keytool \
-              -genkey -v -keystore release.keystore \
-              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US" \
-              -storepass android -keypass android
-          fi
-
-          APK_PATHS=$(find -L ../result -name "*.apk" 2>/dev/null || true)
-          if [ -z "$APK_PATHS" ]; then
-            echo "No APKs found in result/. Did you run 'nix build .#wolvic-apk'?"
-            exit 1
-          fi
-
-          for APK_PATH in $APK_PATHS; do
-            BASE_NAME=$(basename "$APK_PATH")
-            SIGNED_NAME="signed-''${BASE_NAME/-unsigned/}"
-            echo "Signing $SIGNED_NAME..."
-            cp "$APK_PATH" "$SIGNED_NAME"
-            chmod +w "$SIGNED_NAME"
-            ${pkgs.apksigner}/bin/apksigner sign \
-              --ks release.keystore --ks-key-alias androiddebugkey \
-              --ks-pass pass:android --key-pass pass:android \
-              "$SIGNED_NAME"
-            ${pkgs.apksigner}/bin/apksigner verify "$SIGNED_NAME" \
-              && echo "  ✓ Verified OK"
-          done
-
-          echo "Done. Signed APKs are in $(pwd)/"
-          popd > /dev/null
-        '';
+        signScript = pkgs.writeShellApplication {
+          name = "sign-apk";
+          runtimeInputs = [ pkgs.jdk17 pkgs.apksigner ];
+          text = builtins.readFile ./nix/scripts/sign-apk.sh;
+        };
 
         # ── Emulator convenience runner ───────────────────────────────────────
         # One-shot script: boot AVD, wait for boot-complete, install Wolvic,
         # open a URL.  Pass a URL as the first argument or it defaults to
         # https://wolvic.com
-        runEmulator = pkgs.writeShellScriptBin "run-emulator" ''
-          set -euo pipefail
+        runEmulator = pkgs.writeShellApplication {
+          name = "run-emulator";
+          text = pkgs.replaceVars ./nix/scripts/run-emulator.sh {
+            emuSdk = "${androidCompositionEmu.androidsdk}/libexec/android-sdk";
+          };
+        };
 
-          OPEN_URL="''${1:-https://wolvic.com}"
-          EMU_SDK="${androidCompositionEmu.androidsdk}/libexec/android-sdk"
-          ADB="$EMU_SDK/platform-tools/adb"
-          AVDMGR="$EMU_SDK/cmdline-tools/bin/avdmanager"
-          EMU="$EMU_SDK/emulator/emulator"
-          DEVICE="wolvic-test"
-
-          export ANDROID_HOME="$EMU_SDK"
-          export ANDROID_AVD_HOME="''${ANDROID_AVD_HOME:-$HOME/.android/avd}"
-          mkdir -p "$ANDROID_AVD_HOME"
-
-          # Locate APK: env var → ./result/ → build first
-          if [ -n "''${WOLVIC_APK:-}" ]; then
-            APK_PATH="$WOLVIC_APK"
-          elif ls result/*.apk &>/dev/null 2>&1; then
-            APK_PATH="$(ls result/*.apk | head -1)"
-          else
-            echo "→ No APK in result/. Run 'nix build .#wolvic-apk' first."
-            exit 1
-          fi
-          echo "→ Using APK: $APK_PATH"
-
-          # Create AVD if needed
-          if ! "$AVDMGR" list avd 2>/dev/null | grep -q "Name: $DEVICE"; then
-            echo "→ Creating AVD '$DEVICE'..."
-            echo "" | "$AVDMGR" create avd --force \
-              -n "$DEVICE" \
-              -k "system-images;android-35;default;x86_64" \
-              -p "$ANDROID_AVD_HOME/$DEVICE.avd"
-            CFG="$ANDROID_AVD_HOME/$DEVICE.avd/config.ini"
-            printf 'hw.keyboard=yes\nhw.lcd.width=1920\nhw.lcd.height=1080\nhw.lcd.density=240\nhw.bluetooth=no\n' >> "$CFG"
-          fi
-
-          # Find a free port
-          PORT=""
-          for p in $(seq 5554 2 5584); do
-            if [ -z "$("$ADB" devices 2>/dev/null | grep "emulator-$p")" ]; then
-              PORT=$p; break
-            fi
-          done
-          [ -z "$PORT" ] && { echo "All emulator ports are in use!"; exit 1; }
-          SERIAL="emulator-$PORT"
-          echo "→ Using port $PORT"
-
-          # Boot
-          echo "→ Booting emulator..."
-          "$EMU" -avd "$DEVICE" -port "$PORT" \
-            -gpu swiftshader_indirect \
-            -no-snapshot -no-boot-anim -no-audio \
-            -memory 3072 -cores 4 &
-          EMU_PID=$!
-          trap "echo '→ Shutting down...'; kill $EMU_PID 2>/dev/null || true" EXIT
-
-          # Wait for boot-complete
-          echo "→ Waiting for boot..."
-          "$ADB" -s "$SERIAL" wait-for-device
-          until [ "$("$ADB" -s "$SERIAL" shell getprop dev.bootcomplete 2>/dev/null | tr -d '\r')" = "1" ]; do
-            sleep 3
-          done
-          echo "→ Boot complete."
-
-          # Disable animations for faster UI response
-          "$ADB" -s "$SERIAL" shell settings put global window_animation_scale 0.0
-          "$ADB" -s "$SERIAL" shell settings put global transition_animation_scale 0.0
-          "$ADB" -s "$SERIAL" shell settings put global animator_duration_scale 0.0
-
-          # Install Wolvic
-          if "$ADB" -s "$SERIAL" shell pm list packages 2>/dev/null | grep -q "com.igalia.wolvic"; then
-            echo "→ Wolvic already installed."
-          else
-            echo "→ Installing $APK_PATH..."
-            "$ADB" -s "$SERIAL" install -r "$APK_PATH"
-            echo "→ Installed."
-          fi
-
-          # Launch with URL
-          echo "→ Opening $OPEN_URL in Wolvic..."
-          "$ADB" -s "$SERIAL" shell am start \
-            -a android.intent.action.VIEW \
-            -d "$OPEN_URL" \
-            -n "com.igalia.wolvic/com.igalia.wolvic.VRBrowserActivity"
-
-          echo ""
-          echo "Wolvic is running. Ctrl-C to shut down."
-          echo "Tip: adb -s $SERIAL logcat -s GeckoView"
-          wait $EMU_PID
-        '';
 
       in
       {
-        # ── Packages ──────────────────────────────────────────────────────────
         packages = {
           etc2comp       = pkgs.etc2comp;
           fxr-compressor = pkgs.fxr-compressor;
 
-          default            = wolvicPackage;
-          wolvic-apk         = wolvicPackage;
-          wolvic-noapi-debug = wolvicPackage;
-          wolvic-update-deps = wolvicPackage.mitmCache.updateScript;
+          default            = wolvicApk;
+          wolvic-apk         = wolvicApk;
+          wolvic-noapi-debug = wolvicApk;
+          wolvic-update-deps = wolvicApk.mitmCache.updateScript;
 
           # ── Bare emulator (no APK pre-loaded) ───────────────────────────────
           # Use this to confirm your AVD / KVM setup works before the APK build.
@@ -293,7 +144,7 @@
               abiVersions         = [ "x86_64" ];
             };
             # Wire the Nix-built APK directly — emulateApp globs for *.apk
-            app      = "${wolvicPackage}";
+            app      = "${wolvicApk}";
             package  = "com.igalia.wolvic";
             activity = "com.igalia.wolvic.VRBrowserActivity";
           };

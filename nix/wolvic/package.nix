@@ -3,32 +3,19 @@
   stdenv,
   fetchFromGitHub,
   gradle_8,
-  androidenv,
+  androidComposition,
+  androidSdkPath,
   jdk17,
   ninja,
+  getopt,
 }:
 
 let
   gradle = gradle_8.override { java = jdk17; };
-
-  androidComposition = androidenv.composeAndroidPackages {
-    buildToolsVersions  = [ "35.0.0" ];
-    platformVersions    = [ "35" ];
-    includeNDK          = true;
-    ndkVersions         = [ "27.0.12077973" ];
-    cmakeVersions       = [ "3.22.1" ];
-    includeSystemImages = false;
-    includeEmulator     = false;
-  };
-
-  androidSdk     = androidComposition.androidsdk;
-  androidSdkPath = "${androidSdk}/libexec/android-sdk";
-
-  cmakeVersion = "3.22.1";
-  ndkVersion   = "27.0.12077973";
+  cmakeVersion = (lib.head androidComposition.cmake).version;
+  ndkVersion   = androidComposition.ndk-bundle.version;
   version      = "1.9";
-
-  ndkPath = "${androidSdkPath}/ndk/${ndkVersion}";
+  ndkPath      = "${androidSdkPath}/ndk/${ndkVersion}";
 
 in
 stdenv.mkDerivation (finalAttrs: {
@@ -43,7 +30,11 @@ stdenv.mkDerivation (finalAttrs: {
     fetchSubmodules = true;
   };
 
-  nativeBuildInputs = [ gradle ninja ];
+  nativeBuildInputs = [ 
+    gradle
+    ninja
+    getopt
+  ];
 
   postPatch = ''
     # Fix 1: patch out `git rev-parse` — no .git dir in the sandbox
@@ -139,7 +130,7 @@ EOF
   gradleFlags = [
     "-Dfile.encoding=utf-8"
     "-Dorg.gradle.configuration-cache=false"
-    "-Pandroid.aapt2FromMavenOverride=${androidSdkPath}/build-tools/35.0.0/aapt2"
+    "-Pandroid.aapt2FromMavenOverride=${androidSdkPath}/build-tools/${androidComposition.buildToolsVersion}/aapt2"
     "-Pandroid.injected.testOnly=false"
   ];
 
